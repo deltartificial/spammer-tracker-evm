@@ -47,9 +47,6 @@ class TransactionMonitor {
     if (!methodId) return;
 
     const from = tx.from.toLowerCase();
-    console.log(
-      `   📝 Method detected: ${methods[methodId]} (${methodId}) by ${from}`
-    );
 
     const currentActivity = this.addressActivities.get(from) || {
       lastSeen: Number(blockNumber),
@@ -63,9 +60,13 @@ class TransactionMonitor {
       };
     } else {
       currentActivity.methodCounts[methodId].count++;
+      console.log("\n   🎯 Method repetition detected:");
+      console.log(`      Address: ${from}`);
+      console.log(`      Method: ${methods[methodId]} (${methodId})`);
       console.log(
-        `   🔄 Repetition #${currentActivity.methodCounts[methodId].count} of the method`
+        `      Count: #${currentActivity.methodCounts[methodId].count}`
       );
+      console.log("      ---");
     }
 
     currentActivity.lastSeen = Number(blockNumber);
@@ -76,19 +77,29 @@ class TransactionMonitor {
 
     if (methodCount.count > 1 && blockSpan <= this.config.blockRange) {
       if (blockSpan >= this.config.minConsecutiveBlocks) {
-        console.log(`🚨 Spam detected from address ${from}:`);
+        console.log("\n   🚨 SPAM ALERT:");
+        console.log("   ----------------------------------------");
+        console.log(`   From: ${from}`);
+        console.log(`   To: ${tx.to}`);
         console.log(`   Method: ${methods[methodId]} (${methodId})`);
-        console.log(`   Number of uses: ${methodCount.count}`);
+        console.log(`   Occurrences: ${methodCount.count}`);
         console.log(
-          `   Over ${blockSpan} blocks (from ${methodCount.firstBlock} to ${blockNumber})`
+          `   Block span: ${blockSpan} (${methodCount.firstBlock} → ${blockNumber})`
         );
+        console.log(`   Gas: ${Number(tx.maxFeePerGas || 0n) / 1e9} gwei`);
+        console.log(
+          `   Priority: ${Number(tx.maxPriorityFeePerGas || 0n) / 1e9} gwei`
+        );
+        console.log("   ----------------------------------------\n");
       }
     }
   }
 
   processBlock(block: { transactions: Transaction[] }, blockNumber: bigint) {
-    console.log(`\n📦 Analyzing block ${blockNumber}:`);
-    console.log(`   📊 Number of transactions: ${block.transactions.length}`);
+    console.log("\n============================================");
+    console.log(`🆕 Block #${blockNumber}`);
+    console.log(`📊 Transactions: ${block.transactions.length}`);
+    console.log("============================================\n");
 
     this.cleanupOldActivities(blockNumber);
     block.transactions.forEach((tx) =>
