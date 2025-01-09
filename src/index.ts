@@ -1,9 +1,12 @@
-import { createPublicClient, webSocket } from "viem";
+import { createPublicClient, webSocket, hexToString, formatEther } from "viem";
 import {
   type Transaction,
   type Config,
   type AddressActivity,
   type Methods,
+  type TokenInfo,
+  ERC20_TOTAL_SUPPLY,
+  type CustomError,
 } from "./types";
 import { base } from "viem/chains";
 import methodsJson from "../methods.json";
@@ -21,6 +24,9 @@ class TransactionMonitor {
   private addressActivities: Map<string, AddressActivity> = new Map();
   private methodIds: string[];
   private config: Config;
+  private readonly IGNORED_ERC20 = [
+    "0x4200000000000000000000000000000000000006",
+  ];
 
   constructor(config: Partial<Config> = {}) {
     this.config = { ...DEFAULT_CONFIG, ...config };
@@ -42,69 +48,161 @@ class TransactionMonitor {
     }
   }
 
-  processTransaction(tx: Transaction, blockNumber: bigint) {
-    const methodId = this.getMethodId(tx.input);
-    if (!methodId) return;
-
-    const from = tx.from.toLowerCase();
-
-    const currentActivity = this.addressActivities.get(from) || {
-      lastSeen: Number(blockNumber),
-      methodCounts: {},
-    };
-
-    if (!currentActivity.methodCounts[methodId]) {
-      currentActivity.methodCounts[methodId] = {
-        count: 1,
-        firstBlock: Number(blockNumber),
-      };
-    } else {
-      currentActivity.methodCounts[methodId].count++;
-      console.log("\n   🎯 Method repetition detected:");
-      console.log(`      Address: ${from}`);
-      console.log(`      Method: ${methods[methodId]} (${methodId})`);
-      console.log(
-        `      Count: #${currentActivity.methodCounts[methodId].count}`
-      );
-      console.log("      ---");
-    }
-
-    currentActivity.lastSeen = Number(blockNumber);
-    this.addressActivities.set(from, currentActivity);
-
-    const methodCount = currentActivity.methodCounts[methodId];
-    const blockSpan = Number(blockNumber) - methodCount.firstBlock;
-
-    if (methodCount.count > 1 && blockSpan <= this.config.blockRange) {
-      if (blockSpan >= this.config.minConsecutiveBlocks) {
-        console.log("\n   🚨 SPAM ALERT:");
-        console.log("   ----------------------------------------");
-        console.log(`   From: ${from}`);
-        console.log(`   To: ${tx.to}`);
-        console.log(`   Method: ${methods[methodId]} (${methodId})`);
-        console.log(`   Occurrences: ${methodCount.count}`);
-        console.log(
-          `   Block span: ${blockSpan} (${methodCount.firstBlock} → ${blockNumber})`
-        );
-        console.log(`   Gas: ${Number(tx.maxFeePerGas || 0n) / 1e9} gwei`);
-        console.log(
-          `   Priority: ${Number(tx.maxPriorityFeePerGas || 0n) / 1e9} gwei`
-        );
-        console.log("   ----------------------------------------\n");
+  private async checkIfERC20(address: string): Promise<[boolean, string]> {
+    try {
+      if (this.IGNORED_ERC20.includes(address.toLowerCase())) {
+        return [false, ""];
       }
+
+      const code = await client.getBytecode({
+        address: address as `0x${string}`,
+      });
+
+      if (!code || code === "0x") return [false, ""];
+
+      const result = await client.call({
+        to: address as `0x${string}`,
+        data: ERC20_TOTAL_SUPPLY as `0x${string}`,
+      });
+
+      const hexValue =
+        typeof result === "string" ? result : (result as any).data;
+      if (!hexValue || hexValue === "0x") return [false, ""];
+
+      const totalSupply = BigInt(hexValue);
+      return [totalSupply > 0n, formatEther(totalSupply)];
+    } catch {
+      return [false, ""];
     }
   }
 
-  processBlock(block: { transactions: Transaction[] }, blockNumber: bigint) {
-    console.log("\n============================================");
-    console.log(`🆕 Block #${blockNumber}`);
-    console.log(`📊 Transactions: ${block.transactions.length}`);
-    console.log("============================================\n");
+  private extractAddressesFromData(data: string): string[] {
+    const addresses: string[] = [];
+    const cleanData = data.slice(10);
 
-    this.cleanupOldActivities(blockNumber);
-    block.transactions.forEach((tx) =>
-      this.processTransaction(tx, blockNumber)
-    );
+    for (let i = 0; i < cleanData.length; i += 64) {
+      const word = cleanData.slice(i, i + 64);
+      const potentialAddress = "0x" + word.slice(24);
+
+      if (
+        /^0x[a-fA-F0-9]{40}$/.test(potentialAddress) &&
+        potentialAddress !== "0x0000000000000000000000000000000000000000"
+      ) {
+        addresses.push(potentialAddress.toLowerCase());
+      }
+    }
+
+    return [...new Set(addresses)];
+  }
+
+  private async analyzeTokens(data: string): Promise<TokenInfo[]> {
+    const addresses = this.extractAddressesFromData(data);
+    const tokens: TokenInfo[] = [];
+
+    for (const address of addresses) {
+      const [isERC20] = await this.checkIfERC20(address);
+      if (isERC20) {
+        tokens.push({ address, isERC20 });
+      }
+    }
+
+    return tokens;
+  }
+
+  async processTransaction(tx: Transaction, blockNumber: bigint) {
+    try {
+      const methodId = this.getMethodId(tx.input);
+      if (!methodId) return;
+
+      const from = tx.from.toLowerCase();
+
+      const currentActivity = this.addressActivities.get(from) || {
+        lastSeen: Number(blockNumber),
+        methodCounts: {},
+      };
+
+      if (!currentActivity.methodCounts[methodId]) {
+        currentActivity.methodCounts[methodId] = {
+          count: 1,
+          firstBlock: Number(blockNumber),
+        };
+      } else {
+        currentActivity.methodCounts[methodId].count++;
+        console.log("\n   🎯 Method repetition detected:");
+        console.log(`      Address: ${from}`);
+        console.log(`      Method: ${methods[methodId]} (${methodId})`);
+        console.log(
+          `      Count: #${currentActivity.methodCounts[methodId].count}`
+        );
+        console.log("      ---");
+      }
+
+      currentActivity.lastSeen = Number(blockNumber);
+      this.addressActivities.set(from, currentActivity);
+
+      const methodCount = currentActivity.methodCounts[methodId];
+      const blockSpan = Number(blockNumber) - methodCount.firstBlock;
+
+      if (methodCount.count > 1 && blockSpan <= this.config.blockRange) {
+        if (blockSpan >= this.config.minConsecutiveBlocks) {
+          console.log("\n   🚨 SPAM ALERT:");
+          console.log("   ----------------------------------------");
+          console.log(`   From: ${from}`);
+          console.log(`   Router: ${tx.to}`);
+          console.log(`   Hash: ${tx.hash}`);
+          console.log(`   Method: ${methods[methodId]} (${methodId})`);
+          console.log(`   Occurrences: ${methodCount.count}`);
+          console.log(
+            `   Block span: ${blockSpan} (${methodCount.firstBlock} → ${blockNumber})`
+          );
+          console.log(`   Gas: ${Number(tx.maxFeePerGas || 0n) / 1e9} gwei`);
+          console.log(
+            `   Priority: ${Number(tx.maxPriorityFeePerGas || 0n) / 1e9} gwei`
+          );
+
+          const tokens = await this.analyzeTokens(tx.input);
+          if (tokens.length > 0) {
+            console.log("\n   📜 ERC20 Tokens involved:");
+            for (const token of tokens) {
+              console.log(`      • ${token.address}`);
+            }
+          }
+
+          console.log("   ----------------------------------------\n");
+        }
+      }
+    } catch (error: any) {
+      console.log(`⚠️ Error processing transaction ${tx.hash}:`, error.message);
+    }
+  }
+
+  async processBlock(
+    block: { transactions: Transaction[] },
+    blockNumber: bigint
+  ) {
+    try {
+      console.log("\n============================================");
+      console.log(`🆕 Block #${blockNumber}`);
+      console.log(`📊 Transactions: ${block.transactions.length}`);
+      console.log("============================================\n");
+
+      this.cleanupOldActivities(blockNumber);
+
+      for (const tx of block.transactions) {
+        try {
+          await this.processTransaction(tx, blockNumber);
+        } catch (error) {
+          console.log(
+            `⚠️ Error processing transaction ${tx.hash}:`,
+            (error as Error).message
+          );
+          continue;
+        }
+      }
+    } catch (error) {
+      const err = error as CustomError;
+      console.log(`⚠️ Error processing block ${blockNumber}:`, err.message);
+    }
   }
 }
 
@@ -115,36 +213,69 @@ const client = createPublicClient({
 
 async function watchTransactions(config: Partial<Config> = {}) {
   const monitor = new TransactionMonitor(config);
+  let retryCount = 0;
+  const MAX_RETRIES = 5;
+  const RETRY_DELAY = 1000;
 
-  try {
-    console.log("🔍 Monitoring transactions to detect spam...");
+  const sleep = (ms: number) =>
+    new Promise((resolve) => setTimeout(resolve, ms));
 
-    const unwatch = await client.watchBlocks({
-      onBlock: async (block) => {
-        console.log("\n-----------------------------------");
-        console.log(`🆕 New block #${block.number}`);
-        console.log("-----------------------------------");
+  async function setupWebSocket() {
+    try {
+      console.log("🔍 Monitoring transactions to detect spam...");
 
-        const blockWithTransactions = await client.getBlock({
-          blockNumber: block.number,
-          includeTransactions: true,
-        });
+      const unwatch = await client.watchBlocks({
+        onBlock: async (block) => {
+          try {
+            const blockWithTransactions = await client.getBlock({
+              blockNumber: block.number,
+              includeTransactions: true,
+            });
 
-        monitor.processBlock(blockWithTransactions as any, block.number);
-      },
-      onError: (error) => {
-        console.error("❌ Error:", error);
-      },
-    });
+            await monitor.processBlock(
+              blockWithTransactions as any,
+              block.number
+            );
+            retryCount = 0;
+          } catch (error) {
+            console.log(
+              `⚠️ Error processing block ${block.number}:`,
+              (error as Error).message
+            );
+          }
+        },
+        onError: async (error) => {
+          console.log("⚠️ WebSocket error:", error.message);
+          if (retryCount < MAX_RETRIES) {
+            retryCount++;
+            console.log(
+              `🔄 Reconnecting... (attempt ${retryCount}/${MAX_RETRIES})`
+            );
+            await sleep(RETRY_DELAY * retryCount);
+            setupWebSocket();
+          }
+        },
+      });
 
-    process.on("SIGINT", () => {
-      console.log("Stopping monitoring...");
-      unwatch();
-      process.exit(0);
-    });
-  } catch (error) {
-    console.error("❌ Error:", error);
+      process.on("SIGINT", () => {
+        console.log("Stopping monitoring...");
+        unwatch();
+        process.exit(0);
+      });
+    } catch (error: unknown) {
+      console.log("⚠️ Connection error:", (error as Error).message);
+      if (retryCount < MAX_RETRIES) {
+        retryCount++;
+        console.log(
+          `🔄 Retrying connection... (attempt ${retryCount}/${MAX_RETRIES})`
+        );
+        await sleep(RETRY_DELAY * retryCount);
+        setupWebSocket();
+      }
+    }
   }
+
+  setupWebSocket();
 }
 
 watchTransactions({
