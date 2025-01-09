@@ -1,35 +1,26 @@
 import { createPublicClient, webSocket, hexToString, formatEther } from "viem";
 import {
   type Transaction,
-  type Config,
   type AddressActivity,
   type Methods,
   type TokenInfo,
   ERC20_TOTAL_SUPPLY,
   type CustomError,
+  type AppConfig,
 } from "./types";
 import { base } from "viem/chains";
 import methodsJson from "../methods.json";
+import config from "../config.json";
 
 const methods: Methods = methodsJson;
-
-const webSocketUrl = "wss://base-rpc.publicnode.com";
-
-const DEFAULT_CONFIG: Config = {
-  blockRange: 20,
-  minConsecutiveBlocks: 0,
-};
 
 class TransactionMonitor {
   private addressActivities: Map<string, AddressActivity> = new Map();
   private methodIds: string[];
-  private config: Config;
-  private readonly IGNORED_ERC20 = [
-    "0x4200000000000000000000000000000000000006",
-  ];
+  private config: AppConfig;
 
-  constructor(config: Partial<Config> = {}) {
-    this.config = { ...DEFAULT_CONFIG, ...config };
+  constructor() {
+    this.config = config;
     this.methodIds = Object.keys(methods);
   }
 
@@ -40,7 +31,7 @@ class TransactionMonitor {
   }
 
   private cleanupOldActivities(currentBlock: bigint) {
-    const cutoffBlock = currentBlock - BigInt(this.config.blockRange);
+    const cutoffBlock = currentBlock - BigInt(this.config.monitor.blockRange);
     for (const [address, activity] of this.addressActivities.entries()) {
       if (activity.lastSeen < Number(cutoffBlock)) {
         this.addressActivities.delete(address);
@@ -50,7 +41,7 @@ class TransactionMonitor {
 
   private async checkIfERC20(address: string): Promise<[boolean, string]> {
     try {
-      if (this.IGNORED_ERC20.includes(address.toLowerCase())) {
+      if (this.config.ignoredERC20.includes(address.toLowerCase())) {
         return [false, ""];
       }
 
@@ -143,8 +134,11 @@ class TransactionMonitor {
       const methodCount = currentActivity.methodCounts[methodId];
       const blockSpan = Number(blockNumber) - methodCount.firstBlock;
 
-      if (methodCount.count > 1 && blockSpan <= this.config.blockRange) {
-        if (blockSpan >= this.config.minConsecutiveBlocks) {
+      if (
+        methodCount.count > 1 &&
+        blockSpan <= this.config.monitor.blockRange
+      ) {
+        if (blockSpan >= this.config.monitor.minConsecutiveBlocks) {
           console.log("\n   🚨 SPAM ALERT:");
           console.log("   ----------------------------------------");
           console.log(`   From: ${from}`);
@@ -208,14 +202,12 @@ class TransactionMonitor {
 
 const client = createPublicClient({
   chain: base,
-  transport: webSocket(webSocketUrl),
+  transport: webSocket(config.webSocket.url),
 });
 
-async function watchTransactions(config: Partial<Config> = {}) {
-  const monitor = new TransactionMonitor(config);
+async function watchTransactions() {
+  const monitor = new TransactionMonitor();
   let retryCount = 0;
-  const MAX_RETRIES = 5;
-  const RETRY_DELAY = 1000;
 
   const sleep = (ms: number) =>
     new Promise((resolve) => setTimeout(resolve, ms));
@@ -246,12 +238,12 @@ async function watchTransactions(config: Partial<Config> = {}) {
         },
         onError: async (error) => {
           console.log("⚠️ WebSocket error:", error.message);
-          if (retryCount < MAX_RETRIES) {
+          if (retryCount < config.webSocket.maxRetries) {
             retryCount++;
             console.log(
-              `🔄 Reconnecting... (attempt ${retryCount}/${MAX_RETRIES})`
+              `🔄 Reconnecting... (attempt ${retryCount}/${config.webSocket.maxRetries})`
             );
-            await sleep(RETRY_DELAY * retryCount);
+            await sleep(config.webSocket.retryDelay * retryCount);
             setupWebSocket();
           }
         },
@@ -264,12 +256,12 @@ async function watchTransactions(config: Partial<Config> = {}) {
       });
     } catch (error: unknown) {
       console.log("⚠️ Connection error:", (error as Error).message);
-      if (retryCount < MAX_RETRIES) {
+      if (retryCount < config.webSocket.maxRetries) {
         retryCount++;
         console.log(
-          `🔄 Retrying connection... (attempt ${retryCount}/${MAX_RETRIES})`
+          `🔄 Retrying connection... (attempt ${retryCount}/${config.webSocket.maxRetries})`
         );
-        await sleep(RETRY_DELAY * retryCount);
+        await sleep(config.webSocket.retryDelay * retryCount);
         setupWebSocket();
       }
     }
@@ -278,7 +270,4 @@ async function watchTransactions(config: Partial<Config> = {}) {
   setupWebSocket();
 }
 
-watchTransactions({
-  blockRange: DEFAULT_CONFIG.blockRange,
-  minConsecutiveBlocks: DEFAULT_CONFIG.minConsecutiveBlocks,
-});
+watchTransactions();

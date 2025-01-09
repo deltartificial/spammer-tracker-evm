@@ -1,0 +1,14 @@
+{
+  "webSocket": {
+    "url": "wss://base-rpc.publicnode.com",
+    "maxRetries": 5,
+    "retryDelay": 1000
+  },
+  "monitor": {
+    "blockRange": 20,
+    "minConsecutiveBlocks": 0
+  },
+  "ignoredERC20": [
+    "0x4200000000000000000000000000000000000006"
+  ]
+} 
